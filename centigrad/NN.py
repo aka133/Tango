@@ -1,3 +1,7 @@
+# Neural Network implementation of the centigrad engine. 
+# In the actual transformer model, we have a slightly different setup for the MLP.
+
+import numpy as np
 import random
 from engine import Value
 
@@ -9,6 +13,61 @@ class Module:
 
     def parameters(self):
         return []
+    
+    def forward(self, *args, **kwargs):
+        raise NotImplementedError
+    
+    def __call__(self, *args, **kwargs):
+        return self.forward(*args, **kwargs)
+
+class Linear(Module):
+
+    def __init__(self, in_features, out_features):
+        self.weight = Value(np.random.randn(in_features, out_features) * 0.02)
+        self.bias = Value(np.zeros((1, out_features)))
+    
+    def forward(self, x):
+        return x.matmul(self.weight) + self.bias
+    
+    def parameters(self):
+        return [self.weight, self.bias]
+
+class LayerNorm(Module):
+
+    def __init__(self, dim):
+        self.gamma = Value(np.ones(dim))
+        self.beta = Value(np.zeros(dim))
+
+    def forward(self, x):
+        return x.layer_norm(self.gamma, self.beta)
+    
+    def parameters(self):
+        return [self.gamma, self.beta]
+    
+class SwiGLU(Module):
+    def __init__(self, dim, hidden_dim=None):
+        if hidden_dim is None:
+            hidden_dim = 4 * dim
+        self.w_proj = Linear(dim, hidden_dim)
+        self.v_proj = Linear(dim, hidden_dim)
+    
+    def forward(self, x):
+        return self.w_proj(x) * self.v_proj(x).swish()
+    
+    def parameters(self):
+        return self.w_proj.parameters() + self.v_proj.parameters()
+    
+class Embedding(Module):
+    def __init__(self, num_embeddings, embedding_dim):
+        self.weight = Value(np.random.randn(num_embeddings, embedding_dim) * 0.02)
+    
+    def forward(self, indices):
+        # This uses the existing embedding method from Value class
+        return self.weight.embedding(indices, self.weight)
+    
+    def parameters(self):
+        return [self.weight]
+# All code below is NOT implemented in the transformer
 
 class Neuron(Module):
 
