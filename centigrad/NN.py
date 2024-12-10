@@ -124,3 +124,117 @@ class MLP(Module):
     
     def __repr__(self):
         return f"MLP of [{', '.join(str(layer) for layer in self.layers)}]"
+
+class AdamW:
+    def __init__(self, params, lr=1e-3, betas=(0.9, 0.999), eps=1e-8, weight_decay=0.01, max_grad_norm=1.0):
+        """
+        Args:
+            params: iterable of parameters to optimize
+            lr: learning rate
+            betas: coefficients for moving averages (b1, b2)
+            eps: term for numerical stability
+            weight_decay: weight decay (L2 penalty)
+        """
+       
+        self.params = list(params)
+        self.lr = lr
+        self.beta1, self.beta2 = betas
+        self.eps = eps
+        self.weight_decay = weight_decay
+        self.max_grad_norm = max_grad_norm
+
+        # Initialize momentum and velocity terms for each parameter
+        self.m = [np.zeros_like(p.data) for p in self.params]  # First moment
+        self.v = [np.zeros_like(p.data) for p in self.params]  # Second moment
+        self.t = 0  # Time step for bias correction
+
+    def zero_grad(self):
+        """Sets gradients of all parameters to zero."""
+        for p in self.params:
+            p.grad = np.zeros_like(p.data)
+
+    def clip_grad_norm(self):
+        """Clips gradient norm of parameters."""
+        total_norm = 0
+        for p in self.params:
+            if p.grad is not None:
+                param_norm = np.linalg.norm(p.grad.flatten())
+                total_norm += param_norm ** 2
+        total_norm = np.sqrt(total_norm)
+        
+        clip_coef = self.max_grad_norm / (total_norm + 1e-6)
+        if clip_coef < 1:
+            for p in self.params:
+                if p.grad is not None:
+                    p.grad *= clip_coef
+        
+        return total_norm
+
+    def step(self):
+        """Performs a single optimization step with gradient clipping."""
+        # First clip gradients
+        grad_norm = self.clip_grad_norm()
+        
+        self.t += 1
+        
+        for i, p in enumerate(self.params):
+            if p.grad is None:
+                continue
+                
+            # Apply weight decay
+            p.data -= self.lr * self.weight_decay * p.data
+            
+            # Update momentum terms
+            self.m[i] = self.beta1 * self.m[i] + (1 - self.beta1) * p.grad
+            self.v[i] = self.beta2 * self.v[i] + (1 - self.beta2) * (p.grad ** 2)
+            
+            # Bias correction
+            m_hat = self.m[i] / (1 - self.beta1 ** self.t)
+            v_hat = self.v[i] / (1 - self.beta2 ** self.t)
+            
+            # Update parameters
+            p.data -= self.lr * m_hat / (np.sqrt(v_hat) + self.eps)
+            
+        return grad_norm  # Return the gradient norm for logging
+
+class DataLoader:
+    def  __init__(self, data, batch_size, seq_length, split='train'):
+        """
+        Args:
+            data: array of token ids
+            batch_size: number of sequences per batch
+            seq_length: length of each sequences
+            split: 'train' or 'val' to handle differently
+        """
+
+        self.data = data
+        self.batch_size = batch_size
+        self.seq_length = seq_length
+        self.split = split
+
+        # Calculate number of batches
+        self.n_batches = len(data) // (batch_size * seq_length)
+
+        # Initialize position
+        self.current_pos = 0
+
+    def __iter__(self):
+        if self.split == 'train':  # Reset position at start of each epoch for training
+            self.current_pos = 0
+    
+    def get_batch(self):
+        # Get chunk of data and targets
+        chunk_size = self.batch_size * self.seq_length
+        data_chunk = self.data[self.current_pos:self.current_pos + chunk_size + 1]
+        
+        # Update position and handle wrap-around
+        self.current_pos += chunk_size
+        if self.current_pos + chunk_size + 1 > len(self.data):
+            self.current_pos = 0
+            
+        # Reshape into batches
+        x = np.array(data_chunk[:-1]).reshape(self.batch_size, self.seq_length)
+        y = np.array(data_chunk[1:]).reshape(self.batch_size, self.seq_length)
+        
+        # Convert to Value objects
+        return Value(x), Value(y)

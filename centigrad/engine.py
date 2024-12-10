@@ -105,7 +105,50 @@ class Value:
         out._backward = _backward
 
         return out
+
+    def contiguous(self):
+        return self
     
+    def gather(self, dim, indices):
+
+        out = Value(np.take_along_axis(self.data, indices, dim), (self,), 'gather')
+
+        def _backward():
+            # Gradients from gather are sparse, so we need to sum them back to dense
+            np.add.at(self.grad, tuple(indices), out.grad)
+        out._backward = _backward
+
+        return out
+
+    def split(self, dim, indices):
+        """Split tensor along specified axis at given indices.
+        Example: if x has shape (2,3,4), split(axis=1, indices=[1])
+        will return two tensors with shapes (2,1,4) and (2,2,4)
+        """
+        chunks = np.split(self.data, indices, dim)
+        out = [Value(chunk, (self,), 'split') for chunk in chunks]
+
+        def _backward():
+            self.grad += np.concatenate([chunk.grad for chunk in out], axis=dim)
+
+        for chunk in out:
+            chunk._backward = _backward
+
+        return out
+
+    def topk(self, k, dim =-1):
+       
+        indices = np.argsort(self.data, dim)[..., k:]
+
+        values = np.take_along_axis(self.data, indices, dim)
+        out = Value(values, (self,), 'topk')
+
+        def _backward():
+            np.add.at(self.grad, indices, out.grad)
+        out._backward = _backward
+
+        return out
+
     def transpose(self, dim0, dim1):
         """Swap two dimensions of tensor.
         Example: if x has shape (2,3,4)
@@ -119,6 +162,29 @@ class Value:
             # Use same dimension swap to get gradients back to original shape
             # If we swapped dims (0,1) forward, we need to swap (0,1) backward
             self.grad = out.grad.transpose(dims)
+        out._backward = _backward
+
+        return out
+
+    def scaled_dot_product_attention(self, q, k, v, is_causal=False):
+        dk = q.shape[-1]
+        scaling_factor = 1 / np.sqrt(dk)
+        attn = (q @ k.transpose(-2, -1)) * scaling_factor
+
+        if is_causal:
+            mask = attn.causal_mask(attn.shape[-2])
+            attn.data = np.where(mask, float('-inf'), attn.data)
+
+        attn = attn.softmax(dim=-1)
+
+        out = attn @ v
+
+        def _backward():
+            self.grad += [out.grad @ v.transpose(-2, -1)] * scaling_factor
+            v.grad += attn.transpose @ out.grad
+            q.grad += (attn.grad @ k) * scaling_factor
+            k.grad += (attn.grad @ k) * scaling_factor
+        
         out._backward = _backward
 
         return out
@@ -143,6 +209,60 @@ class Value:
         out._backward = _backward
 
         return out
+    
+    def log_softmax(self, dim=-1):
+        """Log softmax along specified dimension."""
+       
+        # Subtract max for numerical stability
+        x_max = np.max(self.data, axis=dim, keepdims=True)
+        exp_x = np.exp(self.data - x_max)
+        log_sum_exp = np.log(np.sum(exp_x, axis=dim, keepdims=True))
+        out = Value(self.data - x_max - log_sum_exp, (self,), 'log_softmax')
+
+        def _backward():
+            # Gradient of log_softmax: grad_i = grad_out_i - exp(log_softmax_i) * sum(grad_out_j)
+            softmax = np.exp(out.data)
+            grad_sum = np.sum(out.grad, axis=dim, keepdims=True)
+            self.grad += out.grad - softmax * grad_sum
+        
+        out._backward = _backward
+
+        return out
+
+    def cross_entropy(self, targets):
+        """
+        Compute cross entropy loss.
+        Args:
+            self: logits of shape (B, T, vocab_size) or (B*T, vocab_size)
+            targets: target indices of shape (B, T) or (B*T)
+        Returns:
+            loss: scalar Value
+        """
+        # Reshape if needed
+        if len(self.shape) == 3:
+            B, T, C = self.shape
+            logits = self.reshape(B*T, C)
+            targets = targets.reshape(B*T)
+        else:
+            logits = self
+
+        # Compute log probabilities
+        log_probs = logits.log_softmax(dim=-1)
+        
+        # Gather correct token log probs using numpy advanced indexing
+        correct_log_probs = log_probs.data[np.arange(len(targets.data)), targets.data]
+        
+        # Mean negative log probability
+        loss = Value(-np.mean(correct_log_probs), (log_probs,), 'cross_entropy')
+
+        def _backward():
+            # Gradient is softmax - one_hot
+            softmax = np.exp(log_probs.data)
+            softmax[np.arange(len(targets.data)), targets.data] -= 1
+            log_probs.grad += softmax * loss.grad / len(targets.data)
+        loss._backward = _backward
+
+        return loss
 
     def layer_norm(self, gamma=None, beta=None, eps=1e-5):
         """Layer normalization with optional affine transform.
@@ -208,6 +328,7 @@ class Value:
             # During backprop, we need to accumulate gradients for each used embedding
             # np.add.at allows adding to the same index multiple times
             np.add.at(embedding_matrix.grad, indices.data, out.grad)
+       
         out._backward = _backward
         
         return out
