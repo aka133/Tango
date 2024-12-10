@@ -5,38 +5,57 @@ import ctypes
 
 def cudnn_layernorm(x, gamma, beta, eps = 1e-5):
     """
-    Apply layer normalization using cuDNN
-    x: input tensor
-    gamma, beta: scale and shift parameters
+    Apply layer normalization: y = γ * ((x - μ) / √(σ² + ε)) + β
+    
+    Args:
+        x: Input tensor (batch_size, hidden_dim) - must be contiguous GPU tensor
+        gamma: Scale parameter (hidden_dim,) - must be contiguous GPU tensor
+        beta: Shift parameter (hidden_dim,) - must be contiguous GPU tensor
+        eps: Epsilon for numerical stability
+        handle: Existing cuDNN handle (optional)
     """
-
-    # Get cuDNN handle
-    handle = cudnn.cudnnCreate()
-
-    # Create tensor descriptors
-    x_desc = cudnn.cudnnCreateTensorDescriptor()
-    # Set descriptor for input
-    cudnn.cudnnSetTensor4dDescriptor(
-        x_desc,
-        cudnn.CUDNN_TENSOR_NCHW,
-        cudnn.CUDNN_DATA_FLOAT,
-        *x.shape
-    )
-
-    # Call cuDNN LayerNorm
-    cudnn.cudnnLayerNormForward(
-        handle,
-        x_desc, # Input descriptor
-        x, # Input tensor
-        x_desc, # Output descriptor
-        output, # Output tensor
-        gamma, # Scale parameter
-        beta, # Shift parameter
-        eps, # Epsilon for numerical stability
-        mean, # Mean buffer (optional)
-        variance # Variance buffer (optional)
-    )
-
-    # Clean up
-    cudnn.cudnnDestroyTensorDescriptor(x_desc)
-    cudnn.cudnnDestroy(handle)
+    # Create or use existing handle
+    should_destroy = False
+    if handle is None:
+        handle = cudnn.cudnnCreate()
+        should_destroy = True
+        
+    try:
+        # Create descriptor for input/output tensor
+        x_desc = cudnn.cudnnCreateTensorDescriptor()
+        
+        # Configure descriptor
+        # NCHW format: [batch_size, channels, height, width]
+        # For LayerNorm, we reshape to: [N, C, 1, 1]
+        cudnn.cudnnSetTensor4dDescriptor(
+            x_desc,
+            cudnn.CUDNN_TENSOR_NCHW,     # Format
+            cudnn.CUDNN_DATA_FLOAT,      # Data type
+            x.shape[0],                  # Batch size
+            x.shape[1],                  # Hidden dim
+            1, 1                         # Height, Width = 1
+        )
+        
+        # Allocate buffers for mean and variance
+        mean = torch.zeros_like(x)
+        variance = torch.zeros_like(x)
+        
+        # Forward pass
+        cudnn.cudnnLayerNormForward(
+            handle,
+            x_desc,                      # Input descriptor
+            x,                           # Input data
+            x_desc,                      # Output descriptor
+            output,                      # Output buffer
+            gamma,                       # Scale parameter
+            beta,                        # Shift parameter
+            eps,                         # Epsilon
+            mean,                        # Mean buffer
+            variance                     # Variance buffer
+        )
+        
+    finally:
+        # Clean up
+        cudnn.cudnnDestroyTensorDescriptor(x_desc)
+        if should_destroy:
+            cudnn.cudnnDestroy(handle)

@@ -3,36 +3,49 @@ import numpy as np
 from cuda import cublas
 import ctypes
 
-def cublas_matmul(A, B, C, M, N, K):
+def cublas_matmul(A, B, C, M, N, K, alpha=1.0, beta=0.0, handle=None):
     """
-    Compute C = A @ B using cuBLAS
-    A: (M, K)
-    B: (K, N)
-    C: (M, N)
+    Compute: C = α(A @ B) + βC using cuBLAS SGEMM
+    
+    Args:
+        A: Input matrix (M, K) - must be contiguous GPU tensor
+        B: Input matrix (K, N) - must be contiguous GPU tensor
+        C: Output matrix (M, N) - must be contiguous GPU tensor
+        M, N, K: Matrix dimensions
+        alpha: Scalar for AB product (default: 1.0)
+        beta: Scalar for C (default: 0.0)
+        handle: Existing cuBLAS handle (optional)
     """
 
-    # Get handle to cuBLAS context
-    handle = cublas.cublasCreate()
+    # Create or use existing handle
+    should_destroy = False
+    if handle is None:
+        handle = cublas.cublasCreate()
+        should_destroy = True
 
-    # Set matrix operation parameters
-    alpha = ctypes.c_float(1.0)
+    try:
 
-    # Set matrix operation parameters
-    alpha = ctypes.c_float(1.0)
-    beta = ctypes.c_float(0.0)
+        # Convert scalars to ctypes for cuBLAS
+        alpha_c = ctypes.c_float(alpha)
+        beta_c = ctypes.c_float(beta)
+        
+        # SGEMM: Single-precision General Matrix Multiply
+        # C = α(A @ B) + βC
+        # Note: cuBLAS uses column-major order!
 
-    # Call cuBLAS SGEMM (single precision general matrix multiply)
-    cublas.cublasSgemm(
-        handle,
-        cublas.CUBLAS_OP_N,
-        cublas.CUBLAS_OP_N,
-        M, N, K,
-        alpha,
-        A, M, # A matrix, leading dimension
-        B, K, # B matrix, leading dimension
-        beta,
-        C, M # C matrix, leading dimension
-    )
+        cublas.cublasSgemm(
+            handle,
+            cublas.CUBLAS_OP_N,
+            cublas.CUBLAS_OP_N,
+            M, N, K,
+            alpha_c,
+            A, M, # A matrix, leading dimension
+            B, K, # B matrix, leading dimension
+            beta_c,
+            C, M # C matrix, leading dimension
+        )
 
-    # Clean up
-    cublas.cublasDestroy(handle)
+    finally:
+        # Clean up
+        if should_destroy:
+            cublas.cublasDestroy(handle)
