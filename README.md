@@ -4,9 +4,11 @@ This project is an active exercise in building an LLM and associated evaluation/
 
 I started by creating my own autograd library, using Andrej Karpathy's micrograd library for most of the foundation and adding in support for SwiGLU, tensor operations and operations like batchnorm.
 
+I've also added custom CUDA kernels for matmuls, optimizing with shared memory tiling, float4 vectorization and double buffering. 
+
 The next steps are:
+- Manually written Triton matmul kernels and evaluating performance compared to optimization with CuBLAS and custom CUTLASS kernels. Will compare performance using NSight.
 - From-scratch implementation of byte-pair encoding for tokenization (using support from HuggingFace until then)
-- Manually written CUDA/Triton kernels (evaluating performance compared to optimization with CuBLAS and similar libraries)
 - Multi-GPU support
 - MCTS integration for o1-like reasoning capabilities
 - Open-source AI evals
