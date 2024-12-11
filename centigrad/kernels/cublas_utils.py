@@ -1,7 +1,6 @@
 import torch
 import numpy as np
-from cuda import cublas
-import ctypes
+import cupy.cuda.cublas as cublas
 
 def cublas_matmul(A, B, C, M, N, K, alpha=1.0, beta=0.0, handle=None):
     """

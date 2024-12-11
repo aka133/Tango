@@ -1,6 +1,6 @@
 import torch
 import numpy as np
-from cuda import cublas
+import cupy.cuda.cublas as cublas
 import ctypes
 
 def cudnn_layernorm(x, gamma, beta, eps = 1e-5):

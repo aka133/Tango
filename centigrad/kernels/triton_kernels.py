@@ -2,7 +2,6 @@ import triton
 import triton.language as tl
 
 @triton.jit
-
 def primitive_matmul_kernel(
     # Pointers to matrices
     a_ptr, b_ptr, c_ptr,
@@ -51,6 +50,7 @@ def primitive_matmul_kernel(
 
 
 # Optimized kernel with improved autotuning parameters and block index calculation
+@triton.jit
 def matmul_kernel(
     # Pointers to matrices
     a_ptr, b_ptr, c_ptr,
@@ -108,20 +108,38 @@ def matmul_kernel(
     mask = (offs_cm[:, None] < M) & (offs_cn[None, :] < N)
     tl.store(c_ptr + offs_cm[:, None] * N + offs_cn[None, :], c, mask=mask)
 
-@triton.autotune(
-    configs=[
-        # Let autotuner try different configurations
+@triton.jit
+def matmul1_kernel(
+    A, B, C, M, N, K,
+    BLOCK_SIZE_M: tl.constexpr,
+    BLOCK_SIZE_N: tl.constexpr,
+    BLOCK_SIZE_K: tl.constexpr,
+):
+    grid = (triton.cdiv(M, BLOCK_SIZE_M) * triton.cdiv(N, BLOCK_SIZE_N),)
+    primitive_matmul_kernel[grid](A, B, C, M, N, K, BLOCK_SIZE_M, BLOCK_SIZE_N, BLOCK_SIZE_K)
+
+@triton.jit
+def matmul2_kernel(
+    A, B, C, M, N, K,
+    BLOCK_SIZE_M: tl.constexpr,
+    BLOCK_SIZE_N: tl.constexpr,
+    BLOCK_SIZE_K: tl.constexpr,
+):
+    grid = (triton.cdiv(M, BLOCK_SIZE_M) * triton.cdiv(N, BLOCK_SIZE_N),)
+    matmul_kernel[grid](A, B, C, M, N, K, BLOCK_SIZE_M, BLOCK_SIZE_N, BLOCK_SIZE_K)
+
+def matmul1(A, B, C, M, N, K):
+    configs = [
         triton.Config({'BLOCK_SIZE_M': 128, 'BLOCK_SIZE_N': 256, 'BLOCK_SIZE_K': 64}),
         triton.Config({'BLOCK_SIZE_M': 64, 'BLOCK_SIZE_N': 128, 'BLOCK_SIZE_K': 32}),
         triton.Config({'BLOCK_SIZE_M': 32, 'BLOCK_SIZE_N': 64, 'BLOCK_SIZE_K': 32}),
-    ],
-    key = ['M', 'N', 'K']
-)
-
-def matmul1(A, B, C, M, N, K):
-    grid = lambda META: (triton.cdiv(M, META['BLOCK_SIZE_M']) * triton.cdiv(N, META['BLOCK_SIZE_N']),)
-    primitive_matmul_kernel[grid](A, B, C, M, N, K, **META)
+    ]
+    matmul1_kernel[configs](A, B, C, M, N, K)
 
 def matmul2(A, B, C, M, N, K):
-    grid = lambda META: (triton.cdiv(M, META['BLOCK_SIZE_M']) * triton.cdiv(N, META['BLOCK_SIZE_N']),)
-    matmul_kernel[grid](A, B, C, M, N, K, **META)
+    configs = [
+        triton.Config({'BLOCK_SIZE_M': 128, 'BLOCK_SIZE_N': 256, 'BLOCK_SIZE_K': 64}),
+        triton.Config({'BLOCK_SIZE_M': 64, 'BLOCK_SIZE_N': 128, 'BLOCK_SIZE_K': 32}),
+        triton.Config({'BLOCK_SIZE_M': 32, 'BLOCK_SIZE_N': 64, 'BLOCK_SIZE_K': 32}),
+    ]
+    matmul2_kernel[configs](A, B, C, M, N, K)
