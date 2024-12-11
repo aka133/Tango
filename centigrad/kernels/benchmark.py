@@ -3,8 +3,8 @@ import numpy as np
 import torch
 import triton
 import cupy as cp
-import cuda.cublas as cublas
-import cuda.cudnn as cudnn
+import ctypes
+from ctypes import c_void_p, c_int, c_float, POINTER
 from centigrad.kernels import (
     float_4_coalesced_matmul,
     double_buffering_loop_unrolling_matmul,
@@ -16,6 +16,20 @@ from centigrad.kernels import (
 from centigrad.engine import Value
 import torch.cuda.profiler as profiler
 import torch.cuda.nvtx as nvtx
+
+# Load CUDA libraries
+_libcublas = ctypes.CDLL('libcublas.so')
+_libcudnn = ctypes.CDLL('libcudnn.so')
+
+# Define handle types
+cublasHandle_t = c_void_p
+cudnnHandle_t = c_void_p
+
+# Create/Destroy handle functions
+_libcublas.cublasCreate_v2.restype = c_int
+_libcublas.cublasCreate_v2.argtypes = [POINTER(cublasHandle_t)]
+_libcublas.cublasDestroy_v2.restype = c_int
+_libcublas.cublasDestroy_v2.argtypes = [cublasHandle_t]
 
 class KernelBenchmark:
     def __init__(self,
@@ -31,15 +45,23 @@ class KernelBenchmark:
         self.rep = rep
         self.results = {}
 
-        # Create handles once for reuse
-
-        self.cublas_handle = cublas.cublasCreate()
-        self.cudnn_handle = cudnn.cudnnCreate()
+        # Create handles
+        handle = cublasHandle_t()
+        status = _libcublas.cublasCreate_v2(ctypes.byref(handle))
+        if status != 0:
+            raise RuntimeError(f"cuBLAS initialization failed with status {status}")
+        self.cublas_handle = handle
+        
+        handle = cudnnHandle_t()
+        status = _libcudnn.cudnnCreate(ctypes.byref(handle))
+        if status != 0:
+            raise RuntimeError(f"cuDNN initialization failed with status {status}")
+        self.cudnn_handle = handle
     
     def __del__(self):
         # Cleanup handles
-        cublas.cublasDestroy(self.cublas_handle)
-        cudnn.cudnnDestroy(self.cudnn_handle)
+        if hasattr(self, 'cublas_handle'):
+            _libcublas.cublasDestroy_v2(self.cublas_handle)
 
     def verify_result(self, result, reference, name):
         """Verify kernel output matches reference implementation"""
