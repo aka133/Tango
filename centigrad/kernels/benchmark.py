@@ -3,7 +3,8 @@ import numpy as np
 import torch
 import triton
 import cupy as cp
-from cuda import cublas, cudnn
+import cuda.cublas as cublas
+import cuda.cudnn as cudnn
 from centigrad.kernels import (
     float_4_coalesced_matmul,
     double_buffering_loop_unrolling_matmul,
