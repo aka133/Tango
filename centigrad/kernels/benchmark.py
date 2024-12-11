@@ -6,12 +6,8 @@ import cupy as cp
 import ctypes
 from ctypes import c_void_p, c_int, c_float, POINTER
 from centigrad.kernels import (
-    float4_coalesced_matmul,
-    double_buffering_loop_unrolling_matmul,
     matmul1,
     matmul2,
-    cudnn_layernorm,
-    cublas_matmul
 )
 from centigrad import Value
 import torch.cuda.profiler as profiler
@@ -30,6 +26,15 @@ _libcublas.cublasCreate_v2.restype = c_int
 _libcublas.cublasCreate_v2.argtypes = [POINTER(cublasHandle_t)]
 _libcublas.cublasDestroy_v2.restype = c_int
 _libcublas.cublasDestroy_v2.argtypes = [cublasHandle_t]
+
+# Load our compiled CUDA libraries
+cuda_lib = ctypes.CDLL('./libcuda_kernels.so')
+cublas_lib = ctypes.CDLL('./libcublas_utils.so')
+cudnn_lib = ctypes.CDLL('./libcudnn_utils.so')
+
+cuda_lib.float4_coalesced_matmul.argtypes = [c_void_p, c_void_p, c_void_p, c_int, c_int, c_int]
+cuda_lib.double_buffering_loop_unrolling_matmul.argtypes = [c_void_p, c_void_p, c_void_p, c_int, c_int, c_int]
+cublas_lib.cublas_matmul.argtypes = [c_void_p, c_void_p, c_void_p, c_int, c_int, c_int, c_float, c_float]
 
 class KernelBenchmark:
     def __init__(self,
@@ -143,18 +148,39 @@ class KernelBenchmark:
             b_torch = torch.from_numpy(b_np).cuda()
             c_torch = torch.zeros((M, N), dtype=torch.float32, device="cuda")
 
-            # CuPy arrays
-            a_cp = cp.array(a_np)
-            b_cp = cp.array(b_np)
-
             # Benchmark implementations
             implementations = {
                 "numpy_cpu": (lambda a, b: np.matmul(a, b), (a_np, b_np)),
                 "torch": (lambda a, b: torch.matmul(a, b), (a_torch, b_torch)),
-                "cublas": (lambda a, b, c: cublas_matmul(a, b, c, M, N, K, handle=self.cublas_handle), 
-                          (a_torch, b_torch, c_torch)),
-                "custom_cuda_1": (lambda a, b: float4_coalesced_matmul(a, b), (a_cp, b_cp)),
-                "custom_cuda_2": (lambda a, b: double_buffering_loop_unrolling_matmul(a, b), (a_cp, b_cp)),
+                "cublas": (
+                    lambda a, b, c: cublas_lib.cublas_matmul(
+                        ctypes.c_void_p(int(a.data_ptr())),
+                        ctypes.c_void_p(int(b.data_ptr())),
+                        ctypes.c_void_p(int(c.data_ptr())),
+                        M, N, K,
+                        ctypes.c_float(1.0),
+                        ctypes.c_float(0.0)
+                    ),
+                    (a_torch, b_torch, c_torch)
+                ),
+                "float4_coalesced": (
+                    lambda a, b, c: cuda_lib.float4_coalesced_matmul(
+                        ctypes.c_void_p(int(a.data_ptr())),
+                        ctypes.c_void_p(int(b.data_ptr())),
+                        ctypes.c_void_p(int(c.data_ptr())),
+                        M, N, K
+                    ),
+                    (a_torch, b_torch, c_torch)
+                ),
+                "double_buffering": (
+                    lambda a, b, c: cuda_lib.double_buffering_loop_unrolling_matmul(
+                        ctypes.c_void_p(int(a.data_ptr())),
+                        ctypes.c_void_p(int(b.data_ptr())),
+                        ctypes.c_void_p(int(c.data_ptr())),
+                        M, N, K
+                    ),
+                    (a_torch, b_torch, c_torch)
+                ),
                 "triton_1": (lambda a, b, c: matmul1(a, b, c, M, N, K), (a_torch, b_torch, c_torch)),
                 "triton_2": (lambda a, b, c: matmul2(a, b, c, M, N, K), (a_torch, b_torch, c_torch))
             }
@@ -184,7 +210,17 @@ class KernelBenchmark:
             # Benchmark implementations
             implementations = {
                 "torch": (reference, (x, )),
-                "cudnn": (lambda x: cudnn_layernorm(x, gamma, beta, handle=self.cudnn_handle), (x,)),
+                "cudnn": (
+                    lambda x: cudnn_lib.cudnn_layernorm(
+                        ctypes.c_void_p(int(x.data_ptr())),
+                        ctypes.c_void_p(int(gamma.data_ptr())),
+                        ctypes.c_void_p(int(beta.data_ptr())),
+                        batch_size,
+                        hidden_dim,
+                        ctypes.c_float(1e-5)
+                    ),
+                    (x,)
+                ),
                 "centigrad": (lambda x: Value.layer_norm(x, gamma, beta), (x,))
             }
 
