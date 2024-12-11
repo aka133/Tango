@@ -49,17 +49,6 @@ def primitive_matmul_kernel(
     offs_cn = offs_bn
     tl.store(c_ptr + offs_cm[:, None] * N + offs_cn[None, :], c)
 
-# Grid and block configuration
-@triton.autotune(
-    configs = [
-        triton.Config({'BLOCK_SIZE_M': 128, 'BLOCK_SIZE_N': 256, 'BLOCK_SIZE_K': 64}),
-        triton.Config({'BLOCK_SIZE_M': 64, 'BLOCK_SIZE_N': 128, 'BLOCK_SIZE_K': 32}),
-        triton.Config({'BLOCK_SIZE_M': 32, 'BLOCK_SIZE_N': 64, 'BLOCK_SIZE_K': 32}),
-    ],
-    key = ['M', 'N', 'K']
-)
-
-@triton.jit
 
 # Optimized kernel with improved autotuning parameters and block index calculation
 def matmul_kernel(
