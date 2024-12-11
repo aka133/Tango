@@ -6,14 +6,14 @@ import cupy as cp
 import ctypes
 from ctypes import c_void_p, c_int, c_float, POINTER
 from centigrad.kernels import (
-    float_4_coalesced_matmul,
+    float4_coalesced_matmul,
     double_buffering_loop_unrolling_matmul,
     matmul1,
     matmul2,
     cudnn_layernorm,
     cublas_matmul
 )
-from centigrad.engine import Value
+from centigrad import Value
 import torch.cuda.profiler as profiler
 import torch.cuda.nvtx as nvtx
 
@@ -153,7 +153,7 @@ class KernelBenchmark:
                 "torch": (lambda a, b: torch.matmul(a, b), (a_torch, b_torch)),
                 "cublas": (lambda a, b, c: cublas_matmul(a, b, c, M, N, K, handle=self.cublas_handle), 
                           (a_torch, b_torch, c_torch)),
-                "custom_cuda_1": (lambda a, b: float_4_coalesced_matmul(a, b), (a_cp, b_cp)),
+                "custom_cuda_1": (lambda a, b: float4_coalesced_matmul(a, b), (a_cp, b_cp)),
                 "custom_cuda_2": (lambda a, b: double_buffering_loop_unrolling_matmul(a, b), (a_cp, b_cp)),
                 "triton_1": (lambda a, b, c: matmul1(a, b, c, M, N, K), (a_torch, b_torch, c_torch)),
                 "triton_2": (lambda a, b, c: matmul2(a, b, c, M, N, K), (a_torch, b_torch, c_torch))
