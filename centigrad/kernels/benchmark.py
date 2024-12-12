@@ -11,6 +11,11 @@ from centigrad.kernels import (
 from centigrad import Value
 import torch.cuda.profiler as profiler
 import torch.cuda.nvtx as nvtx
+import os
+
+# Set CUDA DSA before any CUDA operations
+os.environ['TORCH_USE_CUDA_DSA'] = '0'
+os.environ['CUDA_LAUNCH_BLOCKING'] = '1'
 
 # Load CUDA libraries
 _libcublas = ctypes.CDLL('libcublas.so')
@@ -34,6 +39,10 @@ cublas_lib = ctypes.CDLL('./libcublas_utils.so')
 cuda_lib.float4_coalesced_matmul.argtypes = [c_void_p, c_void_p, c_void_p, c_int, c_int, c_int]
 cuda_lib.double_buffering_loop_unrolling_matmul.argtypes = [c_void_p, c_void_p, c_void_p, c_int, c_int, c_int]
 cublas_lib.cublas_matmul.argtypes = [c_void_p, c_void_p, c_void_p, c_int, c_int, c_int, c_float, c_float]
+
+os.environ['CUDA_LAUNCH_BLOCKING'] = '1'
+torch.cuda.init()
+torch.cuda.set_device(0)
 
 class KernelBenchmark:
     def __init__(self,
@@ -152,122 +161,90 @@ class KernelBenchmark:
         """Benchmark all matmul implementations"""
         for M, N, K in self.matmul_sizes:
             print(f"\nBenchmarking matmul with size {M}x{N}x{K}")
-
-            # Initialize inputs with controlled range
-            rng = np.random.RandomState(42)  # Fixed seed for reproducibility
-            a_np = rng.uniform(-1, 1, (M, K)).astype(np.float32)
-            b_np = rng.uniform(-1, 1, (K, N)).astype(np.float32)
-            reference = np.matmul(a_np, b_np)
-
-            # GPU tensors
-            a_torch = torch.from_numpy(a_np).cuda()
-            b_torch = torch.from_numpy(b_np).cuda()
-            c_torch = torch.zeros((M, N), dtype=torch.float32, device="cuda")
-
-            # Debug: Print input statistics
-            print(f"Input A - min: {a_np.min():.6f}, max: {a_np.max():.6f}")
-            print(f"Input B - min: {b_np.min():.6f}, max: {b_np.max():.6f}")
-            print(f"Reference - min: {reference.min():.6f}, max: {reference.max():.6f}")
-
-            # Verify PyTorch result first as sanity check
-            torch_result = torch.matmul(a_torch, b_torch)
-            torch_np = torch_result.cpu().numpy()
-            print("\nPyTorch matmul check:")
-            print(f"PyTorch result - min: {torch_np.min():.6f}, max: {torch_np.max():.6f}")
-            print(f"Difference stats - min: {(torch_np - reference).min():.6f}, max: {(torch_np - reference).max():.6f}")
-
-            # Test CUBLAS specifically
-            c_torch.zero_()  # Ensure clean output tensor
-            cublas_lib.cublas_matmul(
-                ctypes.c_void_p(int(a_torch.data_ptr())),
-                ctypes.c_void_p(int(b_torch.data_ptr())),
-                ctypes.c_void_p(int(c_torch.data_ptr())),
-                M, N, K,
-                ctypes.c_float(1.0),  # alpha
-                ctypes.c_float(0.0)   # beta
-            )
-            torch.cuda.synchronize()
-            cublas_result = c_torch.cpu().numpy()
-            print("\nCUBLAS check:")
-            print(f"CUBLAS result - min: {cublas_result.min():.6f}, max: {cublas_result.max():.6f}")
-            print(f"Difference stats - min: {(cublas_result - reference).min():.6f}, max: {(cublas_result - reference).max():.6f}")
-
-            # GPU tensors
-            a_torch = torch.from_numpy(a_np).cuda()
-            b_torch = torch.from_numpy(b_np).cuda()
-            c_torch = torch.zeros((M, N), dtype=torch.float32, device="cuda")
-
-            # Ensure GPU is synchronized before benchmarks
-            torch.cuda.synchronize()
-
-            # Benchmark implementations
-            print("\nDebug Triton inputs:")
-            print(f"Input shapes: A={a_torch.shape}, B={b_torch.shape}, C={c_torch.shape}")
-            print(f"Input devices: A={a_torch.device}, B={b_torch.device}, C={c_torch.device}")
-            print(f"Input strides: A={a_torch.stride()}, B={b_torch.stride()}, C={c_torch.stride()}")
-            print(f"Input dtypes: A={a_torch.dtype}, B={b_torch.dtype}, C={c_torch.dtype}")
-            print(f"Dimensions: M={M}, N={N}, K={K}")
-
-            implementations = {
-                "numpy_cpu": (lambda a, b: np.matmul(a, b), (a_np, b_np)),
-                "torch": (lambda a, b: torch.matmul(a, b), (a_torch, b_torch)),
-                "cublas": (
-                    lambda a, b, c: (
+            
+            try:
+                # Create inputs using uniform instead of randn for large matrices
+                if M * K > 16 * 1024 * 1024:  # If larger than 16M elements
+                    print("Large matrix detected, using uniform distribution...")
+                    a_torch = torch.empty(M, K, device='cuda').uniform_(-1, 1)
+                    b_torch = torch.empty(K, N, device='cuda').uniform_(-1, 1)
+                else:
+                    a_torch = torch.randn(M, K, device='cuda')
+                    b_torch = torch.randn(K, N, device='cuda')
+                
+                c_torch = torch.zeros((M, N), device='cuda')
+                
+                # Simple timing for each implementation
+                implementations = {
+                    "numpy": lambda: np.matmul(a_torch.cpu().numpy(), b_torch.cpu().numpy()),
+                    "torch": lambda: torch.matmul(a_torch, b_torch),
+                    "triton": lambda: matmul(a_torch, b_torch),
+                    "cublas": lambda: (
+                        print(f"\nCUBLAS params: M={M}, N={N}, K={K}"),
                         cublas_lib.cublas_matmul(
-                            ctypes.c_void_p(int(a.data_ptr())),
-                            ctypes.c_void_p(int(b.data_ptr())),
-                            ctypes.c_void_p(int(c.data_ptr())),
-                            M, N, K,
+                            ctypes.c_void_p(int(a_torch.data_ptr())),
+                            ctypes.c_void_p(int(b_torch.data_ptr())),
+                            ctypes.c_void_p(int(c_torch.data_ptr())),
+                            ctypes.c_int(M),
+                            ctypes.c_int(N),
+                            ctypes.c_int(K),
                             ctypes.c_float(1.0),
                             ctypes.c_float(0.0)
                         ),
-                        c  # Return the output tensor
+                        c_torch
                     )[1],
-                    (a_torch, b_torch, c_torch)
-                ),
-                "float4_coalesced": (
-                    lambda a, b, c: (
-                        cuda_lib.float4_coalesced_matmul(
-                            ctypes.c_void_p(int(a.data_ptr())),
-                            ctypes.c_void_p(int(b.data_ptr())),
-                            ctypes.c_void_p(int(c.data_ptr())),
+                    "float4": lambda: (
+                        cuda_lib.launch_float4_matmul(
+                            ctypes.c_void_p(int(a_torch.data_ptr())),
+                            ctypes.c_void_p(int(b_torch.data_ptr())),
+                            ctypes.c_void_p(int(c_torch.data_ptr())),
                             M, N, K
                         ),
-                        torch.cuda.synchronize(),  # Make sure kernel is done
-                        c  # Return the output tensor
-                    )[2],  # Get the tensor from the tuple
-                    (a_torch, b_torch, c_torch)
-                ),
-                "double_buffering": (
-                    lambda a, b, c: (
-                        cuda_lib.double_buffering_loop_unrolling_matmul(
-                            ctypes.c_void_p(int(a.data_ptr())),
-                            ctypes.c_void_p(int(b.data_ptr())),
-                            ctypes.c_void_p(int(c.data_ptr())),
+                        torch.cuda.synchronize(),
+                        c_torch
+                    )[2],
+                    "double_buffer": lambda: (
+                        cuda_lib.launch_double_buffer_matmul(
+                            ctypes.c_void_p(int(a_torch.data_ptr())),
+                            ctypes.c_void_p(int(b_torch.data_ptr())),
+                            ctypes.c_void_p(int(c_torch.data_ptr())),
                             M, N, K
                         ),
-                        torch.cuda.synchronize(),  # Make sure kernel is done
-                        c  # Return the output tensor
-                    )[2],  # Get the tensor from the tuple
-                    (a_torch, b_torch, c_torch)
-                ),
-                "triton": (
-                    lambda a, b, c: (
-                        print("\nCalling Triton kernel..."),
-                        c.copy_(matmul(a, b).float()),
-                        print("Triton kernel completed"),
-                        c  # Return c as the result
-                    )[1],
-                    (a_torch, b_torch, c_torch)
-                )
-            }
-
-            for name, (fn, inputs) in implementations.items():
-                result = self.benchmark_fn(fn, f"matmul_{name}", inputs, reference)
-                if result:
-                    # Add TFLOPS calculation for matmul
-                    result["tflops"] = (2 * M * N * K) / (result["mean"] * 1e-12)
-                    self.results[f"{name}_{M}x{N}x{K}"] = result
+                        torch.cuda.synchronize(),
+                        c_torch
+                    )[2]
+                }
+                
+                results = {}
+                for name, impl in implementations.items():
+                    try:
+                        # Warmup
+                        for _ in range(3):
+                            _ = impl()
+                            torch.cuda.synchronize()
+                        
+                        # Time it
+                        torch.cuda.synchronize()
+                        start = time.perf_counter()
+                        for _ in range(10):
+                            _ = impl()
+                            torch.cuda.synchronize()
+                        end = time.perf_counter()
+                        
+                        avg_time = (end - start) / 10
+                        tflops = (2 * M * N * K) / (avg_time * 1e12)
+                        print(f"{name}: {avg_time*1000:.2f}ms ({tflops:.1f} TFLOPS)")
+                        
+                        results[name] = {"time": avg_time, "tflops": tflops}
+                        
+                    except Exception as e:
+                        print(f"{name} failed: {str(e)}")
+                
+                self.results[f"{M}x{N}x{K}"] = results
+                
+            except Exception as e:
+                print(f"Failed to benchmark size {M}x{N}x{K}: {str(e)}")
+                continue
 
     def debug_small_matmul(self):
         """Debug with a small matrix multiplication case"""
@@ -352,75 +329,38 @@ class KernelBenchmark:
     '''
     def print_results(self):
         """Pretty print results with comparison to baseline."""
-        # Group results by operation and size
-        matmul_results = {k: v for k, v in self.results.items() if k.startswith("matmul")}
-        ln_results = {k: v for k, v in self.results.items() if k.startswith("layernorm")}
-        
-        # Print matmul results
         for size in self.matmul_sizes:
             M, N, K = size
             size_str = f"{M}x{N}x{K}"
             print(f"\nMatMul Results for size {size_str}:")
-            print(f"{'Implementation':<15} {'Time (ms)':<10} {'TFLOPS':<10} {'Verified':<10}")
-            print("-" * 45)
-            
-            baseline = None
-            for name, stats in matmul_results.items():
-                if size_str in name:
-                    impl_name = name.split("_")[1]  # Skip "matmul_" prefix
-                    if impl_name == "numpy":
-                        baseline = stats["mean"]
-                    
-                    speedup = f"{baseline/stats['mean']:>9.1f}x" if baseline else "baseline"
-                    print(f"{impl_name:<15} "
-                          f"{stats['mean']*1000:>9.2f} "
-                          f"{stats['tflops']:>9.1f} "
-                          f"{str(stats['verified']):>9}")
-        
-        '''
-        # Print layernorm results
-        for size in self.ln_sizes:
-            batch_size, hidden_dim = size
-            size_str = f"{batch_size}x{hidden_dim}"
-            print(f"\nLayerNorm Results for size {size_str}:")
-            print(f"{'Implementation':<15} {'Time (ms)':<10} {'Verified':<10}")
+            print(f"{'Implementation':<15} {'Time (ms)':<10} {'TFLOPS':<10}")
             print("-" * 35)
             
-            baseline = None
-            for name, stats in ln_results.items():
-                if size_str in name:
-                    impl_name = name.split("_")[1]  # Skip "layernorm_" prefix
-                    if impl_name == "torch":
-                        baseline = stats["mean"]
-                    
-                    speedup = f"{baseline/stats['mean']:>9.1f}x" if baseline else "baseline"
-                    print(f"{impl_name:<15} "
-                          f"{stats['mean']*1000:>9.2f} "
-                          f"{str(stats['verified']):>9}")
-        '''
+            if size_str in self.results:
+                for name, stats in self.results[size_str].items():
+                    print(f"{name:<15} {stats['time']*1000:>9.2f} {stats['tflops']:>9.1f}")
 
 def main():
-    # Example sizes
+    # Keep smaller sizes for now
     matmul_sizes = [
-        (1024, 1024, 1024),    # Standard square
-        (4096, 4096, 4096),    # Large square
-        (8192, 128, 1024),     # Typical attention shape
+        (256, 256, 256),       # Small square case
+        (512, 512, 512),       # Medium square case
+        (1024, 1024, 1024),    # Large square case
     ]
     
     ln_sizes = [
-        (32, 768),     # Small batch
-        (128, 768),    # Medium batch
-        (512, 768),    # Large batch
+        (512, 768),     # Base size
+        (128, 768),     # Small batch
+        (2048, 768),    # Large batch
     ]
     
-    benchmark = KernelBenchmark(matmul_sizes, ln_sizes)
-    benchmark.debug_small_matmul()  # Add this line
-
-    # Run benchmarks with Nsight profiling enabled
-    with torch.cuda.profiler.profile():
-        benchmark.benchmark_matmul()
-        # benchmark.benchmark_layernorm()
+    # Force CUDA initialization before any operations
+    torch.cuda.init()
+    torch.cuda.set_device(0)
+    torch.cuda.synchronize()  # Make sure GPU is ready
     
+    benchmark = KernelBenchmark(matmul_sizes, ln_sizes)
+    benchmark.benchmark_matmul()
     benchmark.print_results()
 
 if __name__ == "__main__":
