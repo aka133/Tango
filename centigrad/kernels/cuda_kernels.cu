@@ -300,4 +300,17 @@ __global__ void double_buffering_loop_unrolling_matmul(float* A, float* B, float
     }
 }
 
+// Wrapper functions with proper launch configuration
+void launch_float4_matmul(float* A, float* B, float* C, int M, int N, int K) {
+    dim3 block(32, 32);
+    dim3 grid((N + block.x - 1) / block.x, (M + block.y - 1) / block.y);
+    float4_coalesced_matmul<<<grid, block>>>(A, B, C, M, N, K);
+}
+
+void launch_double_buffer_matmul(float* A, float* B, float* C, int M, int N, int K) {
+    dim3 block(32, 32);
+    dim3 grid((N + block.x - 1) / block.x, (M + block.y - 1) / block.y);
+    double_buffering_loop_unrolling_matmul<<<grid, block>>>(A, B, C, M, N, K);
+}
+
 } // extern "C"
