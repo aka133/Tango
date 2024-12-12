@@ -1,145 +1,121 @@
 import triton
 import triton.language as tl
+import torch
 
-@triton.jit
-def primitive_matmul_kernel(
-    # Pointers to matrices
-    a_ptr, b_ptr, c_ptr,
-    # Matrix dimensions
-    M, N, K, 
-    # Block sizes (known at compile time)
-    BLOCK_SIZE_M: tl.constexpr,
-    BLOCK_SIZE_N: tl.constexpr,
-    BLOCK_SIZE_K: tl.constexpr,
-):
-    """
-    Compute: C = A @ B
-    """
-
-    # Program ID
-    pid = tl.program_id(0)
-
-    # Block ID
-    # Note: Triton automatically handles shared memory and threading
-    block_m = pid // (N // BLOCK_SIZE_N)
-    block_n = pid % (N // BLOCK_SIZE_N)
-
-    # Offses to the start of the block
-    offs_am = block_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
-    offs_bn = block_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
-    offs_k = tl.arange(0, BLOCK_SIZE_K)
-
-    # Initialize accumulator
-    # Note: Triton handles register allocation
-    acc = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.float32)
-
-    # Iterate through K dimension in blocks
-    for k in range(0, K, BLOCK_SIZE_K):
-        # Load blocks from A and B
-        a = tl.load(a_ptr + offs_am[:, None] * K + (k + offs_k[None, :]))
-        b = tl.load(b_ptr + (k + offs_k[:, None]) * N + offs_bn[None, :])
-
-        # Compute block-block dot product
-        acc += tl.dot(a, b)
-
-    # Write result
-    c = acc.to(tl.float32)
-    offs_cm = offs_am
-    offs_cn = offs_bn
-    tl.store(c_ptr + offs_cm[:, None] * N + offs_cn[None, :], c)
-
-
-# Optimized kernel with improved autotuning parameters and block index calculation
+@triton.autotune(
+    configs=[
+        triton.Config({'BLOCK_SIZE_M': 128, 'BLOCK_SIZE_N': 256, 'BLOCK_SIZE_K': 64, 'GROUP_SIZE_M': 8}, num_stages=3, num_warps=8),
+        triton.Config({'BLOCK_SIZE_M': 64, 'BLOCK_SIZE_N': 256, 'BLOCK_SIZE_K': 32, 'GROUP_SIZE_M': 8}, num_stages=4, num_warps=4),
+        triton.Config({'BLOCK_SIZE_M': 128, 'BLOCK_SIZE_N': 128, 'BLOCK_SIZE_K': 32, 'GROUP_SIZE_M': 8}, num_stages=4, num_warps=4),
+        triton.Config({'BLOCK_SIZE_M': 128, 'BLOCK_SIZE_N': 64, 'BLOCK_SIZE_K': 32, 'GROUP_SIZE_M': 8}, num_stages=4, num_warps=4),
+    ],
+    key=['M', 'N', 'K'],
+)
 @triton.jit
 def matmul_kernel(
     # Pointers to matrices
     a_ptr, b_ptr, c_ptr,
     # Matrix dimensions
-    M, N, K, 
-    # Block sizes (known at compile time)
-    BLOCK_SIZE_M: tl.constexpr,
-    BLOCK_SIZE_N: tl.constexpr,
-    BLOCK_SIZE_K: tl.constexpr,
-    # Optional: Memory layout hints
-    IS_A_ROW_MAJOR: tl.constexpr = True,
-    IS_B_ROW_MAJOR: tl.constexpr = True,
+    M, N, K,
+    # The stride variables represent how much to increase the ptr by when moving by 1
+    # element in a particular dimension. E.g. `stride_am` is how much to increase `a_ptr`
+    # by to get the element one row down (A has M rows)
+    stride_am, stride_ak,  # stride of matrix A
+    stride_bk, stride_bn,  # stride of matrix B
+    stride_cm, stride_cn,  # stride of matrix C
+    # Meta-parameters
+    BLOCK_SIZE_M: tl.constexpr, BLOCK_SIZE_N: tl.constexpr, BLOCK_SIZE_K: tl.constexpr,
+    GROUP_SIZE_M: tl.constexpr,
+    # Optional meta-parameters
+    ACTIVATION: tl.constexpr = "",
 ):
+    """Kernel for computing the matmul C = A x B.
+    A has shape (M, K), B has shape (K, N) and C has shape (M, N)
     """
-    Optimized matrix multiplication C = A @ B
-    """
-    pid = tl.program_id(0)
-    
-    # Improved block index calculation
-    num_pid_m = triton.cdiv(M, BLOCK_SIZE_M)
-    num_pid_n = triton.cdiv(N, BLOCK_SIZE_N)
-    num_pid_in_group = num_pid_n
+    # -----------------------------------------------------------
+    # Map program ids `pid` to the block of C it should compute.
+    # This is done in a grouped ordering to promote L2 data reuse
+    # See above `L2 Cache Optimizations` section for details
+    pid = tl.program_id(axis=0)
+    num_pid_m = tl.cdiv(M, BLOCK_SIZE_M)
+    num_pid_n = tl.cdiv(N, BLOCK_SIZE_N)
+    num_pid_in_group = GROUP_SIZE_M * num_pid_n
     group_id = pid // num_pid_in_group
-    pid_n = pid % num_pid_in_group
-    pid_m = group_id
+    first_pid_m = group_id * GROUP_SIZE_M
+    group_size_m = min(num_pid_m - first_pid_m, GROUP_SIZE_M)
+    pid_m = first_pid_m + (pid % num_pid_in_group) % group_size_m
+    pid_n = (pid % num_pid_in_group) // group_size_m
 
-    # Offset calculations
+    # ----------------------------------------------------------
+    # Create pointers for the first blocks of A and B.
+    # We will advance this pointer as we move in the K direction
+    # and accumulate
+    # See above `Pointer Arithmetic` section for details
     offs_am = pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
     offs_bn = pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
     offs_k = tl.arange(0, BLOCK_SIZE_K)
+    a_ptrs = a_ptr + (offs_am[:, None] * stride_am + offs_k[None, :] * stride_ak)
+    b_ptrs = b_ptr + (offs_k[:, None] * stride_bk + offs_bn[None, :] * stride_bn)
 
-    # Initialize accumulator with proper dtype
-    acc = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.float32)
+    # -----------------------------------------------------------
+    # Iterate to compute a block of the C matrix
+    # We accumulate into a `[BLOCK_SIZE_M, BLOCK_SIZE_N]` block
+    # of fp32 values for higher accuracy.
+    # `accumulator` will be converted back to fp16 after the loop
+    accumulator = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.float32)
+    for k in range(0, tl.cdiv(K, BLOCK_SIZE_K)):
+        # Add masks for bounds checking
+        a_mask = offs_k[None, :] < K - k * BLOCK_SIZE_K
+        b_mask = offs_k[:, None] < K - k * BLOCK_SIZE_K
+        a = tl.load(a_ptrs, mask=a_mask, other=0.0)
+        b = tl.load(b_ptrs, mask=b_mask, other=0.0)
+        accumulator += tl.dot(a, b)
+        a_ptrs += BLOCK_SIZE_K * stride_ak
+        b_ptrs += BLOCK_SIZE_K * stride_bk
+    
+    # Optional: apply activation function
+    if ACTIVATION == "relu":
+        accumulator = tl.maximum(accumulator, 0)
+    
+    # -----------------------------------------------------------
+    # Write back the block of the output matrix C
+    offs_cm = pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
+    offs_cn = pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
+    c_ptrs = c_ptr + stride_cm * offs_cm[:, None] + stride_cn * offs_cn[None, :]
+    
+    # Convert back to FP16
+    output = accumulator.to(tl.float16)
+    
+    # Write back output
+    c_mask = (offs_cm[:, None] < M) & (offs_cn[None, :] < N)
+    tl.store(c_ptrs, output, mask=c_mask)
 
-    # Main loop
-    for k in range(0, K, BLOCK_SIZE_K):
-        # Smart pointer arithmetic based on layout
-        if IS_A_ROW_MAJOR:
-            a = tl.load(a_ptr + offs_am[:, None] * K + (k + offs_k[None, :]))
-        else:
-            a = tl.load(a_ptr + (k + offs_k[None, :]) * M + offs_am[:, None])
-            
-        if IS_B_ROW_MAJOR:
-            b = tl.load(b_ptr + (k + offs_k[:, None]) * N + offs_bn[None, :])
-        else:
-            b = tl.load(b_ptr + offs_bn[None, :] * K + (k + offs_k[:, None]))
-
-        # Use tensor cores when possible
-        acc += tl.dot(a, b, allow_tf32=True)
-
-    # Write back result
-    c = acc.to(tl.float32)
-    offs_cm = offs_am
-    offs_cn = offs_bn
-    mask = (offs_cm[:, None] < M) & (offs_cn[None, :] < N)
-    tl.store(c_ptr + offs_cm[:, None] * N + offs_cn[None, :], c, mask=mask)
-
-@triton.jit
-def matmul1_kernel(
-    A, B, C, M, N, K,
-    BLOCK_SIZE_M: tl.constexpr,
-    BLOCK_SIZE_N: tl.constexpr,
-    BLOCK_SIZE_K: tl.constexpr,
-):
-    grid = (triton.cdiv(M, BLOCK_SIZE_M) * triton.cdiv(N, BLOCK_SIZE_N),)
-    primitive_matmul_kernel[grid](A, B, C, M, N, K, BLOCK_SIZE_M, BLOCK_SIZE_N, BLOCK_SIZE_K)
-
-@triton.jit
-def matmul2_kernel(
-    A, B, C, M, N, K,
-    BLOCK_SIZE_M: tl.constexpr,
-    BLOCK_SIZE_N: tl.constexpr,
-    BLOCK_SIZE_K: tl.constexpr,
-):
-    grid = (triton.cdiv(M, BLOCK_SIZE_M) * triton.cdiv(N, BLOCK_SIZE_N),)
-    matmul_kernel[grid](A, B, C, M, N, K, BLOCK_SIZE_M, BLOCK_SIZE_N, BLOCK_SIZE_K)
-
-def matmul1(A, B, C, M, N, K):
-    configs = [
-        triton.Config({'BLOCK_SIZE_M': 128, 'BLOCK_SIZE_N': 256, 'BLOCK_SIZE_K': 64}),
-        triton.Config({'BLOCK_SIZE_M': 64, 'BLOCK_SIZE_N': 128, 'BLOCK_SIZE_K': 32}),
-        triton.Config({'BLOCK_SIZE_M': 32, 'BLOCK_SIZE_N': 64, 'BLOCK_SIZE_K': 32}),
-    ]
-    matmul1_kernel[configs](A, B, C, M, N, K)
-
-def matmul2(A, B, C, M, N, K):
-    configs = [
-        triton.Config({'BLOCK_SIZE_M': 128, 'BLOCK_SIZE_N': 256, 'BLOCK_SIZE_K': 64}),
-        triton.Config({'BLOCK_SIZE_M': 64, 'BLOCK_SIZE_N': 128, 'BLOCK_SIZE_K': 32}),
-        triton.Config({'BLOCK_SIZE_M': 32, 'BLOCK_SIZE_N': 64, 'BLOCK_SIZE_K': 32}),
-    ]
-    matmul2_kernel[configs](A, B, C, M, N, K)
+def matmul(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
+    """Matrix multiplication implementation using Triton."""
+    # Check constraints
+    assert a.shape[1] == b.shape[0], "Incompatible dimensions"
+    assert a.is_contiguous(), "Matrix A must be contiguous"
+    assert b.is_contiguous(), "Matrix B must be contiguous"
+    
+    # Get dimensions
+    M, K = a.shape
+    K, N = b.shape
+    
+    # Convert to float16 and allocate output
+    a = a.to(torch.float16)
+    b = b.to(torch.float16)
+    c = torch.empty((M, N), device=a.device, dtype=torch.float16)
+    
+    # Launch kernel with grid
+    grid = lambda META: (triton.cdiv(M, META['BLOCK_SIZE_M']) * triton.cdiv(N, META['BLOCK_SIZE_N']), )
+    
+    matmul_kernel[grid](
+        a, b, c,
+        M, N, K,
+        a.stride(0), a.stride(1),
+        b.stride(0), b.stride(1),
+        c.stride(0), c.stride(1),
+        ACTIVATION=""
+    )
+    
+    return c

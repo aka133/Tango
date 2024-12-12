@@ -1,5 +1,12 @@
+#include <vector_types.h>
 
-// Primitive matmul
+#ifdef __CUDACC__
+#define ALIGN(x) __align__(x)
+#else
+#define ALIGN(x)
+#endif
+
+extern "C" {
 
 __global__ void primitive_matmul(float* A, float* B, float* C, int M, int N, int K) {
     // Calculate global row and column indices
@@ -37,14 +44,12 @@ __global__ void primitive_coalesced_matmul(float* A, float *B, float *C, int M, 
         // Load tiles into shared memory
         if (row < M && t * 32 + threadIdx.x < K) {
             tileA[threadIdx.y][threadIdx.x] = A[row * K + t * 32 + threadIdx.x];
-        }
-        else {
+        } else {
             tileA[threadIdx.y][threadIdx.x] = 0.0f;
         }
         if (col < N && t * 32 + threadIdx.y < K) {
             tileB[threadIdx.y][threadIdx.x] = B[(t * 32 + threadIdx.y) * N + col];
-        }
-        else {
+        } else {
             tileB[threadIdx.y][threadIdx.x] = 0.0f;
         }
 
@@ -64,7 +69,7 @@ __global__ void primitive_coalesced_matmul(float* A, float *B, float *C, int M, 
     // Write result to global memory
     if (row < M && col < N) {
         C[row * N + col] = sum;
-
+    }
 }
 
 // Use float4 for memory tiling to speed up memory access
@@ -157,6 +162,7 @@ __global__ void add_loop_unrolling_matmul(float* A, float* B, float* C, int M, i
             tileA[threadIdx.y][threadIdx.x * 4 + 2] = 0.0f;
             tileA[threadIdx.y][threadIdx.x * 4 + 3] = 0.0f;
         }
+        
         if (col < N && (t * 32 + threadIdx.y * 4) < K) {
             float4 b = reinterpret_cast<float4*>(B + (t * 32 + threadIdx.y * 4) * N + col)[0];
             tileB[threadIdx.y * 4 + 0][threadIdx.x] = b.x;
@@ -176,8 +182,7 @@ __global__ void add_loop_unrolling_matmul(float* A, float* B, float* C, int M, i
         // Multiple accumulators (parallel paths):
         float sum1 = 0.0f, sum2 = 0.0f, sum3 = 0.0f, sum4 = 0.0f;
 
-        #pragma unroll  // Tells compiler to unroll this loop
-
+        #pragma unroll 8
         for (int k = 0; k < 32; k += 4) {
             // These four operations can execute in parallel:
             sum1 += tileA[threadIdx.y][k+0] * tileB[k+0][threadIdx.x];
@@ -227,7 +232,7 @@ __global__ void double_buffering_loop_unrolling_matmul(float* A, float* B, float
     }
 
     if (col < N && (threadIdx.y * 4) < K) {
-        float4 b = reinterpret_cast<float4*>(B + (threadIdx.y * 4 * N) + col)[0];
+        float4 b = reinterpret_cast<float4*>(B + (threadIdx.y * 4) * N + col)[0];
         tileB[0][threadIdx.y * 4 + 0][threadIdx.x] = b.x;
         tileB[0][threadIdx.y * 4 + 1][threadIdx.x] = b.y;
         tileB[0][threadIdx.y * 4 + 2][threadIdx.x] = b.z;
@@ -273,8 +278,7 @@ __global__ void double_buffering_loop_unrolling_matmul(float* A, float* B, float
         // Multiple accumulators (parallel paths):
         float sum1 = 0.0f, sum2 = 0.0f, sum3 = 0.0f, sum4 = 0.0f;
 
-        #pragma unroll  // Tells compiler to unroll this loop
-
+        #pragma unroll 8
         for (int k = 0; k < 32; k += 4) {
             // These four operations can execute in parallel:
             sum1 += tileA[current_buffer][threadIdx.y][k+0] * tileB[current_buffer][k+0][threadIdx.x];
@@ -288,7 +292,6 @@ __global__ void double_buffering_loop_unrolling_matmul(float* A, float* B, float
 
         // Synchronize threads
         __syncthreads();
-
     }
 
     // Write result to global memory
@@ -297,3 +300,4 @@ __global__ void double_buffering_loop_unrolling_matmul(float* A, float* B, float
     }
 }
 
+} // extern "C"
