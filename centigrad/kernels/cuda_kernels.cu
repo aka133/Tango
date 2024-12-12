@@ -6,6 +6,19 @@
 #define ALIGN(x)
 #endif
 
+__device__ __forceinline__ float4 load_float4_aligned(const float* ptr) {
+    return *reinterpret_cast<const float4*>(ptr);
+}
+
+__device__ __forceinline__ float4 load_float4_unaligned(const float* ptr) {
+    float4 result;
+    result.x = ptr[0];
+    result.y = ptr[1];
+    result.z = ptr[2];
+    result.w = ptr[3];
+    return result;
+}
+
 extern "C" {
 
 __global__ void primitive_matmul(float* A, float* B, float* C, int M, int N, int K) {
@@ -90,7 +103,14 @@ __global__ void float4_coalesced_matmul(float* A, float* B, float* C, int M, int
     for (int t = 0; t < (K + 31) / 32; t++) {
         // Load tiles into shared memory using float4
         if (row < M && (t * 32 + threadIdx.x * 4) < K) {
-            float4 a = reinterpret_cast<float4*>(A + row * K + t * 32 + threadIdx.x * 4)[0];
+            float4 a;
+            if (((size_t)(A + row * K + t * 32 + threadIdx.x * 4) & 15) == 0) {
+                // Aligned access
+                a = load_float4_aligned(A + row * K + t * 32 + threadIdx.x * 4);
+            } else {
+                // Unaligned access
+                a = load_float4_unaligned(A + row * K + t * 32 + threadIdx.x * 4);
+            }
             tileA[threadIdx.y][threadIdx.x * 4 + 0] = a.x;
             tileA[threadIdx.y][threadIdx.x * 4 + 1] = a.y;
             tileA[threadIdx.y][threadIdx.x * 4 + 2] = a.z;

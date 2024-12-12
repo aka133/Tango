@@ -16,9 +16,14 @@ cuda_lib.launch_float4_matmul.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctyp
 cuda_lib.launch_double_buffer_matmul.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_int, ctypes.c_int, ctypes.c_int]
 
 def benchmark_cuda(M, N, K):
-    a = torch.randn(M, K, device='cuda')
-    b = torch.randn(K, N, device='cuda')
-    c = torch.zeros(M, N, device='cuda')
+    # Ensure aligned memory allocation
+    a = torch.zeros((M, K), device='cuda', dtype=torch.float32)
+    b = torch.zeros((K, N), device='cuda', dtype=torch.float32)
+    c = torch.zeros((M, N), device='cuda', dtype=torch.float32)
+
+    # Fill with random values after allocation
+    a.normal_()
+    b.normal_()
 
     # Float4 Kernel
     try:

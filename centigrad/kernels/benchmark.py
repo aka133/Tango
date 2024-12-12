@@ -1,3 +1,7 @@
+import sys
+import os
+sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
+
 import subprocess
 
 matrix_sizes = [(256, 256, 256), (512, 512, 512), (1024, 1024, 1024)]

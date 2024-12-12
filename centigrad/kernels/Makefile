@@ -1,5 +1,6 @@
 CUDA_PATH = /usr/local/cuda
-NVCC = $(CUDA_PATH)/bin/nvcc
+NVCC = /usr/bin/nvcc
+TORCH_CUDA_DSA = 0
 
 CFLAGS = -O3 -shared -Xcompiler -fPIC
 INCLUDES = -I$(CUDA_PATH)/include -I/root/miniconda3/lib/python3.12/site-packages/nvidia/cudnn/include
