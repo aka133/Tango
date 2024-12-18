@@ -1,0 +1,9 @@
+torch>=2.1.0
+vllm>=0.2.5
+tensorrt>=8.6.1
+tensorrt-llm>=0.5.0
+transformers>=4.35.0
+accelerate>=0.24.0
+bitsandbytes>=0.41.0
+scipy>=1.11.0
+ninja>=1.11.0 
