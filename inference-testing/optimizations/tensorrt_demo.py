@@ -1,11 +1,39 @@
-import tensorrt as trt # type: ignore
+import tensorrt as trt  # type: ignore
 import torch
-from transformers import AutoTokenizer
-import tensorrt_llm # type: ignore
+from transformers import AutoTokenizer, AutoModelForCausalLM
+import tensorrt_llm  # type: ignore
 import time
 from pathlib import Path
 
 model_name = "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
+
+def convert_to_onnx():
+    """Convert model to ONNX format"""
+    print(f"Converting {model_name} to ONNX...")
+    
+    # Load model and tokenizer
+    model = AutoModelForCausalLM.from_pretrained(model_name)
+    tokenizer = AutoTokenizer.from_pretrained(model_name)
+    
+    # Create dummy input
+    text = "Hello, how are you?"
+    inputs = tokenizer(text, return_tensors="pt")
+    
+    # Export to ONNX with proper input handling
+    torch.onnx.export(
+        model,
+        tuple(inputs.values()),  # Convert dict to tuple of tensors
+        "tinyllama.onnx",
+        input_names=['input_ids', 'attention_mask'],
+        output_names=['logits'],
+        dynamic_axes={'input_ids': {0: 'batch', 1: 'sequence'},
+                     'attention_mask': {0: 'batch', 1: 'sequence'},
+                     'logits': {0: 'batch', 1: 'sequence'}},
+        export_params=True,
+        opset_version=11,
+        do_constant_folding=True
+    )
+    print("ONNX conversion complete!")
 
 def setup_engine():
     """Initialize TensorRT-LLM engine"""
@@ -81,6 +109,9 @@ def main():
         "Explain the biggest problems facing the field of whole-brain emulation in two sentences",
         "Write a short story about a robot learning to love"
     ]
+    
+    # Optional: Convert to ONNX first (if needed)
+    # convert_to_onnx()
     
     # Build/load engine and run inference
     start_time = time.time()
