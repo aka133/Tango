@@ -8,17 +8,17 @@ I've added:
 - Custom CUDA kernels for matmuls, optimizing with shared memory tiling, float4 vectorization and double buffering
 - Manually written Triton matmul kernels
 - cuBLAS matmul wrapper
-- cuDNN layernorm wrapper
-- Performance evaluation for all matmul/layernorm acceleration using NSight
+- Performance evaluation for all matmul acceleration using NSight
+- A rough implementation of Meta's recent [chain of continuous thought]([url](https://arxiv.org/html/2412.06769)) (Coconut) paper (Hao et al., 2024)
+- An eval framework with adversarial testing through ANLI and MMLU
+- Inference speed-up with TensorRT-LLM and vLLM implementations
 
 The next steps are:
 - From-scratch implementation of byte-pair encoding for tokenization
 - Multi-GPU support
-- MCTS integration for o1-like reasoning capabilities (using Alibaba's open-source Marco-o1)
-- Open-source AI evals (EleutherAI, MMLU)
-- Designing a redteaming framework
 - Interpretability features (inspired by [Li et al.'s recent work]([url](https://arxiv.org/abs/2410.19750)) on geometric approaches to interpretability)
 - Deployment on a home Kubernetes cluster
+- Combining it all with the from-scratch LLM (currently reasoning and eval/inference frameworks are wrapped onto existing models like Llama 3.3)
 
 Overall, this project is intended as a constant learning experience and features are subject to change.
 
